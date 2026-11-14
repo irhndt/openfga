@@ -17,6 +17,7 @@ Try to keep listed changes to a concise bulleted list of simple explanations of 
 - Various dependency updates. **Breaking (HTTP API):** grpc-gateway v2.33.0 no longer forwards `Grpc-Metadata-*` request headers to gRPC metadata, and rejects malformed query parameters (e.g. non-decimal float spellings, `field[key]` on non-map fields) that were previously accepted. [#3363](https://github.com/openfga/openfga/pull/3363)
 - PostgreSQL: `FindLatestAuthorizationModel` reads only the rows of the store's latest model instead of every model version, so Check and other requests without `authorization_model_id` no longer slow down as the model history grows. [#3377](https://github.com/openfga/openfga/pull/3377)
 - `Write` reuses the server resolved model typesystem to validate tuples, this instead of reading model each time and rebuilding typesystem for it. Using openfga as a library and calling `commands.NewWriteCommand` directly now needs to pass the context alongside call with `typesystem.ContextWithTypesystem`, this mirrors how Expand, ListObjects and ListUsers behave and if missing tuple add fails with `typesystem missing in context`.
+- Memoized `TypeSystem.PathExists` per model, so v1 Check no longer repeats a breadth-first search of the authorization model graph on every dispatch. [#3389](https://github.com/openfga/openfga/pull/3389)
 
 ### Fixed
 - Improved error handling in graph evaluation and iterator processing.
