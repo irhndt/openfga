@@ -1021,6 +1021,29 @@ func TestResolveCheckDeterministic(t *testing.T) {
 	})
 }
 
+// With a breadth of one, union and intersection run their operands in order in the caller's goroutine and stop at
+// the first decisive outcome; ran needs no lock, so the race detector catches any concurrent operand.
+func TestSetOperationsResolveInTurnAtBreadthOne(t *testing.T) {
+	var ran []int
+	operand := func(i int, allowed bool) CheckHandlerFunc {
+		return func(context.Context) (*ResolveCheckResponse, error) {
+			ran = append(ran, i)
+			return &ResolveCheckResponse{Allowed: allowed}, nil
+		}
+	}
+
+	resp, err := union(context.Background(), 1, operand(0, false), operand(1, true), operand(2, true))
+	require.NoError(t, err)
+	require.True(t, resp.GetAllowed())
+	require.Equal(t, []int{0, 1}, ran)
+
+	ran = nil
+	resp, err = intersection(context.Background(), 1, operand(0, true), operand(1, false), operand(2, false))
+	require.NoError(t, err)
+	require.False(t, resp.GetAllowed())
+	require.Equal(t, []int{0, 1}, ran)
+}
+
 func TestCheckWithOneConcurrentGoroutineCausesNoDeadlock(t *testing.T) {
 	const concurrencyLimit = 1
 	ds := memory.New()

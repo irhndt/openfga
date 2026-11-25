@@ -175,6 +175,7 @@ type Server struct {
 	transport                        gateway.Transport
 	resolveNodeLimit                 uint32
 	resolveNodeBreadthLimit          uint32
+	checkResolveNodeBreadthLimit     uint32
 	changelogHorizonOffset           int
 	readChangesMaxPageSize           int32
 	listObjectsDeadline              time.Duration
@@ -333,6 +334,15 @@ func WithResolveNodeLimit(limit uint32) OpenFGAServiceV1Option {
 func WithResolveNodeBreadthLimit(limit uint32) OpenFGAServiceV1Option {
 	return func(s *Server) {
 		s.resolveNodeBreadthLimit = limit
+	}
+}
+
+// WithCheckResolveNodeBreadthLimit overrides WithResolveNodeBreadthLimit for Check and BatchCheck alone.
+// A limit of one resolves each set operation's operands in turn in the caller's goroutine, which suits a
+// datastore that answers from memory: concurrent operands then add only scheduling and stack growth.
+func WithCheckResolveNodeBreadthLimit(limit uint32) OpenFGAServiceV1Option {
+	return func(s *Server) {
+		s.checkResolveNodeBreadthLimit = limit
 	}
 }
 

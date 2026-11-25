@@ -155,25 +155,29 @@ func runHandler(ctx context.Context, handler CheckHandlerFunc) checkOutcome {
 	return checkOutcome{res, err}
 }
 
-// union implements a CheckFuncReducer that requires any of the provided CheckHandlerFunc to resolve
-// to an allowed outcome. The first allowed outcome causes premature termination of the reducer.
-func union(ctx context.Context, concurrencyLimit int, handlers ...CheckHandlerFunc) (resp *ResolveCheckResponse, err error) {
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
+// outcomes starts handlers and returns a function answering their outcomes in completion order: with a limit of one
+// each handler runs in turn in the caller's goroutine when its outcome is asked, else concurrently within the limit.
+func outcomes(ctx context.Context, concurrencyLimit int, handlers []CheckHandlerFunc) func(context.Context) (checkOutcome, error) {
+	if concurrencyLimit == 1 {
+		next := 0
+		return func(parent context.Context) (checkOutcome, error) {
+			if parent.Err() != nil {
+				return checkOutcome{}, parent.Err()
+			}
+			next++
+			return runHandler(ctx, handlers[next-1]), nil
+		}
 	}
-
-	cancellableCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 
 	out := make(chan checkOutcome, len(handlers))
 	if len(handlers) <= concurrencyLimit {
 		// Operands are within concurrencyLimit: one goroutine each.
 		// All oucomes are in buffer and reader count them, no send or close needed.
 		for _, handler := range handlers {
-			go func() { out <- runHandler(cancellableCtx, handler) }()
+			go func() { out <- runHandler(ctx, handler) }()
 		}
 	} else {
-		pool := concurrency.NewPool(cancellableCtx, concurrencyLimit)
+		pool := concurrency.NewPool(ctx, concurrencyLimit)
 		for _, handler := range handlers {
 			pool.Go(func(ctx context.Context) error {
 				out <- runHandler(ctx, handler)
@@ -186,31 +190,51 @@ func union(ctx context.Context, concurrencyLimit int, handlers ...CheckHandlerFu
 		}()
 	}
 
+	return func(parent context.Context) (checkOutcome, error) {
+		select {
+		case <-parent.Done():
+			return checkOutcome{}, parent.Err()
+		case outcome, ok := <-out:
+			if !ok {
+				return checkOutcome{}, fmt.Errorf("%w: reducer outcome channel closed before all handlers reported", openfgaErrors.ErrUnknown)
+			}
+			return outcome, nil
+		}
+	}
+}
+
+// union implements a CheckFuncReducer that requires any of the provided CheckHandlerFunc to resolve
+// to an allowed outcome. The first allowed outcome causes premature termination of the reducer.
+func union(ctx context.Context, concurrencyLimit int, handlers ...CheckHandlerFunc) (resp *ResolveCheckResponse, err error) {
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	cancellableCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	next := outcomes(cancellableCtx, concurrencyLimit, handlers)
+
 	var finalErr error
 	finalResult := &ResolveCheckResponse{Allowed: false}
 
 	for i := 0; i < len(handlers); i++ {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		outcome, err := next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if outcome.err != nil {
+			finalErr = outcome.err
+			continue // Continue to see if we find an 'Allowed: true'
+		}
 
-		case outcome, ok := <-out:
-			if !ok {
-				return nil, fmt.Errorf("%w: reducer outcome channel closed before all handlers reported", openfgaErrors.ErrUnknown)
-			}
-			if outcome.err != nil {
-				finalErr = outcome.err
-				continue // Continue to see if we find an 'Allowed: true'
-			}
+		if outcome.resp.GetResolutionMetadata().CycleDetected {
+			finalResult.ResolutionMetadata.CycleDetected = true
+		}
 
-			if outcome.resp.GetResolutionMetadata().CycleDetected {
-				finalResult.ResolutionMetadata.CycleDetected = true
-			}
-
-			if outcome.resp.Allowed {
-				// Short-circuit success. defer cancel() will clean up workers.
-				return outcome.resp, nil
-			}
+		if outcome.resp.Allowed {
+			// Short-circuit success. defer cancel() will clean up workers.
+			return outcome.resp, nil
 		}
 	}
 
@@ -235,21 +259,7 @@ func intersection(ctx context.Context, concurrencyLimit int, handlers ...CheckHa
 	cancellableCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	pool := concurrency.NewPool(cancellableCtx, concurrencyLimit)
-	out := make(chan checkOutcome, len(handlers))
-
-	for _, handler := range handlers {
-		h := handler // Capture loop variable for the goroutine
-		pool.Go(func(ctx context.Context) error {
-			out <- runHandler(ctx, h)
-			return nil
-		})
-	}
-
-	go func() {
-		_ = pool.Wait()
-		close(out)
-	}()
+	next := outcomes(cancellableCtx, concurrencyLimit, handlers)
 
 	var finalErr error
 	finalResult := &ResolveCheckResponse{
@@ -257,29 +267,24 @@ func intersection(ctx context.Context, concurrencyLimit int, handlers ...CheckHa
 	}
 
 	for i := 0; i < len(handlers); i++ {
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		outcome, err := next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if outcome.err != nil {
+			// Store the first error we see, but don't exit yet.
+			// A definitive 'false' result from another handler can override this.
+			if finalErr == nil {
+				finalErr = outcome.err
+			}
+			continue
+		}
 
-		case outcome, ok := <-out:
-			if !ok {
-				return nil, fmt.Errorf("%w: reducer outcome channel closed before all handlers reported", openfgaErrors.ErrUnknown)
-			}
-			if outcome.err != nil {
-				// Store the first error we see, but don't exit yet.
-				// A definitive 'false' result from another handler can override this.
-				if finalErr == nil {
-					finalErr = outcome.err
-				}
-				continue
-			}
-
-			if outcome.resp.GetResolutionMetadata().CycleDetected || !outcome.resp.Allowed {
-				// Short-circuit failure. defer cancel() will clean up workers.
-				finalResult.Allowed = false
-				finalResult.ResolutionMetadata.CycleDetected = outcome.resp.GetResolutionMetadata().CycleDetected
-				return finalResult, nil
-			}
+		if outcome.resp.GetResolutionMetadata().CycleDetected || !outcome.resp.Allowed {
+			// Short-circuit failure. defer cancel() will clean up workers.
+			finalResult.Allowed = false
+			finalResult.ResolutionMetadata.CycleDetected = outcome.resp.GetResolutionMetadata().CycleDetected
+			return finalResult, nil
 		}
 	}
 
