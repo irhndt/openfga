@@ -1,6 +1,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"strconv"
@@ -454,10 +455,11 @@ func (s *Server) v2Check(
 
 func (s *Server) getCheckResolverBuilder(storeID string) *graph.CheckResolverOrderedBuilder {
 	checkCacheOptions, checkDispatchThrottlingOptions := s.getCheckResolverOptions()
+	breadth := cmp.Or(s.checkResolveNodeBreadthLimit, s.resolveNodeBreadthLimit)
 
 	return graph.NewOrderedCheckResolvers([]graph.CheckResolverOrderedBuilderOpt{
 		graph.WithLocalCheckerOpts([]graph.LocalCheckerOption{
-			graph.WithResolveNodeBreadthLimit(s.resolveNodeBreadthLimit),
+			graph.WithResolveNodeBreadthLimit(breadth),
 			graph.WithOptimizations(s.featureFlagClient.Boolean(serverconfig.ExperimentalCheckOptimizations, storeID)),
 			graph.WithMaxResolutionDepth(s.resolveNodeLimit),
 			graph.WithPlanner(s.planner),
@@ -465,7 +467,7 @@ func (s *Server) getCheckResolverBuilder(storeID string) *graph.CheckResolverOrd
 			graph.WithLocalCheckerLogger(s.logger),
 		}...),
 		graph.WithLocalShadowCheckerOpts([]graph.LocalCheckerOption{
-			graph.WithResolveNodeBreadthLimit(s.resolveNodeBreadthLimit),
+			graph.WithResolveNodeBreadthLimit(breadth),
 			graph.WithOptimizations(true), // shadow checker always uses optimizations
 			graph.WithMaxResolutionDepth(s.resolveNodeLimit),
 			graph.WithPlanner(s.planner),
